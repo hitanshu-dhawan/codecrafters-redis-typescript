@@ -1,5 +1,8 @@
 import * as net from "net";
 
+/** In-memory key-value store for SET/GET commands. */
+const store = new Map<string, string>();
+
 /**
  * Parses a RESP (Redis Serialization Protocol) message into an array of string arguments.
  *
@@ -45,6 +48,8 @@ function parseRESP(data: string): string[] {
  * Supported commands:
  * - `PING` → Responds with `+PONG\r\n` (RESP simple string).
  * - `ECHO <arg>` → Responds with the argument as a RESP bulk string.
+ * - `SET <key> <value>` → Stores the key-value pair and responds with `+OK\r\n`.
+ * - `GET <key>` → Responds with the value as a RESP bulk string, or `$-1\r\n` if not found.
  *
  * @param connection - The TCP socket for the connected client.
  */
@@ -63,6 +68,21 @@ function handleConnection(connection: net.Socket): void {
             // ECHO: echo back the first argument as a bulk string "$<len>\r\n<arg>\r\n"
             const arg = args[1];
             connection.write(`$${arg.length}\r\n${arg}\r\n`);
+        } else if (command === "SET") {
+            // SET: store the key-value pair and confirm with "+OK"
+            const key = args[1];
+            const value = args[2];
+            store.set(key, value);
+            connection.write("+OK\r\n");
+        } else if (command === "GET") {
+            // GET: retrieve the value for the given key, or return null bulk string if not found
+            const key = args[1];
+            const value = store.get(key);
+            if (value !== undefined) {
+                connection.write(`$${value.length}\r\n${value}\r\n`);
+            } else {
+                connection.write("$-1\r\n");
+            }
         }
     });
 }
