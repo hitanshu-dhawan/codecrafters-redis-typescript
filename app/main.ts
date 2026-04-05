@@ -1,7 +1,7 @@
 import * as net from "net";
 
-/** In-memory key-value store for SET/GET commands. */
-const store = new Map<string, string>();
+/** In-memory key-value store. Each entry holds the value and an optional expiry timestamp (epoch ms). */
+const store = new Map<string, { value: string; expiresAt: number | null }>();
 
 /**
  * Parses a RESP (Redis Serialization Protocol) message into an array of string arguments.
@@ -48,8 +48,8 @@ function parseRESP(data: string): string[] {
  * Supported commands:
  * - `PING` → Responds with `+PONG\r\n` (RESP simple string).
  * - `ECHO <arg>` → Responds with the argument as a RESP bulk string.
- * - `SET <key> <value>` → Stores the key-value pair and responds with `+OK\r\n`.
- * - `GET <key>` → Responds with the value as a RESP bulk string, or `$-1\r\n` if not found.
+ * - `SET <key> <value> [PX ms | EX s]` → Stores the key-value pair (with optional expiry) and responds with `+OK\r\n`.
+ * - `GET <key>` → Responds with the value as a RESP bulk string, or `$-1\r\n` if not found or expired.
  *
  * @param connection - The TCP socket for the connected client.
  */
@@ -69,19 +69,42 @@ function handleConnection(connection: net.Socket): void {
             const arg = args[1];
             connection.write(`$${arg.length}\r\n${arg}\r\n`);
         } else if (command === "SET") {
-            // SET: store the key-value pair and confirm with "+OK"
+            // SET: store the key-value pair, with optional PX (ms) or EX (s) expiry
             const key = args[1];
             const value = args[2];
-            store.set(key, value);
+            let expiresAt: number | null = null;
+
+            // Check for optional expiry arguments (case-insensitive)
+            for (let i = 3; i < args.length; i++) {
+                const option = args[i].toUpperCase();
+                if (option === "PX" && i + 1 < args.length) {
+                    // PX: expiry in milliseconds
+                    expiresAt = Date.now() + parseInt(args[i + 1]);
+                    break;
+                } else if (option === "EX" && i + 1 < args.length) {
+                    // EX: expiry in seconds
+                    expiresAt = Date.now() + parseInt(args[i + 1]) * 1000;
+                    break;
+                }
+            }
+
+            store.set(key, { value, expiresAt });
             connection.write("+OK\r\n");
         } else if (command === "GET") {
-            // GET: retrieve the value for the given key, or return null bulk string if not found
+            // GET: retrieve the value for the given key, checking for expiry
             const key = args[1];
-            const value = store.get(key);
-            if (value !== undefined) {
-                connection.write(`$${value.length}\r\n${value}\r\n`);
-            } else {
+            const entry = store.get(key);
+
+            if (entry === undefined) {
+                // Key does not exist
                 connection.write("$-1\r\n");
+            } else if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
+                // Key has expired — remove it and return null
+                store.delete(key);
+                connection.write("$-1\r\n");
+            } else {
+                // Key exists and is still valid
+                connection.write(`$${entry.value.length}\r\n${entry.value}\r\n`);
             }
         }
     });
