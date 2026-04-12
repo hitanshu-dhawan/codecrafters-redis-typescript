@@ -3,6 +3,9 @@ import * as net from "net";
 /** In-memory key-value store. Each entry holds the value and an optional expiry timestamp (epoch ms). */
 const store = new Map<string, { value: string; expiresAt: number | null }>();
 
+/** In-memory list store. Each entry holds an ordered array of strings. */
+const lists = new Map<string, string[]>();
+
 /**
  * Parses a RESP (Redis Serialization Protocol) message into an array of string arguments.
  *
@@ -105,6 +108,72 @@ function handleConnection(connection: net.Socket): void {
             } else {
                 // Key exists and is still valid
                 connection.write(`$${entry.value.length}\r\n${entry.value}\r\n`);
+            }
+        } else if (command === "RPUSH") {
+            const key = args[1];
+            const elements = args.slice(2);
+            let list = lists.get(key);
+            if (!list) {
+                list = [];
+                lists.set(key, list);
+            }
+            list.push(...elements);
+            connection.write(`:${list.length}\r\n`);
+        } else if (command === "LPUSH") {
+            const key = args[1];
+            const elements = args.slice(2);
+            let list = lists.get(key);
+            if (!list) {
+                list = [];
+                lists.set(key, list);
+            }
+            for (const el of elements) {
+                list.unshift(el);
+            }
+            connection.write(`:${list.length}\r\n`);
+        } else if (command === "LRANGE") {
+            const key = args[1];
+            let start = parseInt(args[2]);
+            let stop = parseInt(args[3]);
+            const list = lists.get(key);
+            if (!list || list.length === 0) {
+                connection.write("*0\r\n");
+            } else {
+                const len = list.length;
+                if (start < 0) start = Math.max(start + len, 0);
+                if (stop < 0) stop = stop + len;
+                if (stop >= len) stop = len - 1;
+                if (start > stop || start >= len) {
+                    connection.write("*0\r\n");
+                } else {
+                    const slice = list.slice(start, stop + 1);
+                    let resp = `*${slice.length}\r\n`;
+                    for (const el of slice) {
+                        resp += `$${el.length}\r\n${el}\r\n`;
+                    }
+                    connection.write(resp);
+                }
+            }
+        } else if (command === "LLEN") {
+            const key = args[1];
+            const list = lists.get(key);
+            connection.write(`:${list ? list.length : 0}\r\n`);
+        } else if (command === "LPOP") {
+            const key = args[1];
+            const list = lists.get(key);
+            if (!list || list.length === 0) {
+                connection.write("$-1\r\n");
+            } else if (args.length > 2) {
+                const count = Math.min(parseInt(args[2]), list.length);
+                const removed = list.splice(0, count);
+                let resp = `*${removed.length}\r\n`;
+                for (const el of removed) {
+                    resp += `$${el.length}\r\n${el}\r\n`;
+                }
+                connection.write(resp);
+            } else {
+                const el = list.shift()!;
+                connection.write(`$${el.length}\r\n${el}\r\n`);
             }
         }
     });
